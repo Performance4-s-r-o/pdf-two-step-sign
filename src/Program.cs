@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using iText.Kernel.Geom;
@@ -34,6 +35,7 @@ namespace PdfSignApp
     public string CertificatePem { get; set; } = "";
     public string SignedHash { get; set; } = "";
     public string PresignedPdfPath { get; set; } = "";
+    public string HashToSign { get; set; } = "";
   }
 
   class CustomPdfSigner : PdfSigner
@@ -52,11 +54,18 @@ namespace PdfSignApp
     private readonly PdfName _subFilter;
     private byte[] _docBytesHash;
 
+    private X509Certificate[] _chain;
+
     internal DigestCalcBlankSigner(PdfName filter, PdfName subFilter)
     {
       _docBytesHash = Array.Empty<byte>();
       _filter = filter;
       _subFilter = subFilter;
+    }
+
+    public virtual void SetChain(X509Certificate[] chain)
+    {
+      _chain = chain;
     }
 
     internal virtual byte[] GetDocBytesHash()
@@ -66,7 +75,7 @@ namespace PdfSignApp
 
     public virtual byte[] Sign(Stream docBytes)
     {
-      _docBytesHash = CalcDocBytesHash(docBytes);
+      _docBytesHash = CalcDocBytesHash(docBytes, _chain);
       // Return empty signature bytes as placeholder
       return Array.Empty<byte>();
     }
@@ -75,66 +84,26 @@ namespace PdfSignApp
     {
       signDic.Put(PdfName.Filter, _filter);
       signDic.Put(PdfName.SubFilter, _subFilter);
+      signDic.Put(PdfName.Contents, new PdfNumber(16386));
     }
 
-    internal static byte[] CalcDocBytesHash(Stream docBytes)
+    internal static byte[] CalcDocBytesHash(Stream docBytes, X509Certificate[] chain)
     {
-      return DigestAlgorithms.Digest(docBytes, DigestUtilities.GetDigest(DigestAlgorithms.SHA256));
+
+
+      var digest = DigestAlgorithms.Digest(docBytes, DigestUtilities.GetDigest(DigestAlgorithms.SHA256));
+      PdfPKCS7 signature = new PdfPKCS7(null, chain, "SHA256", false);
+      return signature.GetAuthenticatedAttributeBytes(digest, PdfSigner.CryptoStandard.CMS, null, null);
     }
   }
 
-  class Program
+  class PdfSignProgram
   {
-    static void Main(string[] args)
-    {
-      if (args.Length < 1)
-      {
-        PrintUsage();
-        return;
-      }
-
-      string command = args[0].ToLowerInvariant();
-
-      try
-      {
-        switch (command)
-        {
-          case "presign":
-            // Usage: PdfSignApp presign <base64_presign_input>
-            if (args.Length < 2)
-            {
-              Console.Error.WriteLine("Missing base64-encoded presign input.");
-              return;
-            }
-            HandlePreSign(args[1]);
-            break;
-
-          case "sign":
-            // Usage: PdfSignApp sign <base64_sign_input>
-            if (args.Length < 2)
-            {
-              Console.Error.WriteLine("Missing base64-encoded sign input.");
-              return;
-            }
-            HandleSign(args[1]);
-            break;
-
-          default:
-            PrintUsage();
-            break;
-        }
-      }
-      catch (Exception ex)
-      {
-        Console.Error.WriteLine("An unexpected error occurred: " + ex.Message);
-      }
-    }
-
     /// <summary>
     /// Handles the presign command.
     /// </summary>
     /// <param name="base64Input">Base64-encoded PreSignInput JSON string.</param>
-    static void HandlePreSign(string base64Input)
+    public static string? HandlePreSign(string base64Input)
     {
       PreSignInput input;
       try
@@ -149,7 +118,7 @@ namespace PdfSignApp
       catch (Exception ex)
       {
         Console.Error.WriteLine("Error decoding and parsing presign input: " + ex.Message);
-        return;
+        return null;
       }
 
       byte[] originalPdf;
@@ -160,7 +129,7 @@ namespace PdfSignApp
       catch (Exception ex)
       {
         Console.Error.WriteLine("Error decoding base64 PDF content: " + ex.Message);
-        return;
+        return null;
       }
 
       // Create the signer container
@@ -174,12 +143,13 @@ namespace PdfSignApp
       catch (Exception ex)
       {
         Console.Error.WriteLine("Error creating presigned PDF: " + ex.Message);
-        return;
+        return null;
       }
 
       // Write the presigned PDF to a temp file
       string preSignedPdfPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "presigned_" + Guid.NewGuid().ToString("N") + ".pdf");
       File.WriteAllBytes(preSignedPdfPath, pdfWithPlaceholder);
+      File.WriteAllBytes(preSignedPdfPath + ".original.pdf", originalPdf);
 
       // Prepare the output object
       var output = new
@@ -193,13 +163,14 @@ namespace PdfSignApp
 
       // Output the base64-encoded JSON
       Console.WriteLine(outputBase64);
+      return outputBase64;
     }
 
     /// <summary>
     /// Handles the sign command.
     /// </summary>
     /// <param name="base64Input">Base64-encoded SignInput JSON string.</param>
-    static void HandleSign(string base64Input)
+    public static string? HandleSign(string base64Input)
     {
       SignInput input;
       try
@@ -214,13 +185,13 @@ namespace PdfSignApp
       catch (Exception ex)
       {
         Console.Error.WriteLine("Error decoding and parsing sign input: " + ex.Message);
-        return;
+        return null;
       }
 
       if (!File.Exists(input.PresignedPdfPath))
       {
         Console.Error.WriteLine("Pre-signed PDF not found: " + input.PresignedPdfPath);
-        return;
+        return null;
       }
 
       byte[] preSignedPdf = File.ReadAllBytes(input.PresignedPdfPath);
@@ -232,24 +203,10 @@ namespace PdfSignApp
       catch (Exception ex)
       {
         Console.Error.WriteLine("Error finalizing PDF signature: " + ex);
-        return;
+        return null;
       }
 
-      // Output the final PDF to a temp file
-      string finalPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "signed_" + Guid.NewGuid().ToString("N") + ".pdf");
-      File.WriteAllBytes(finalPath, fullySignedPdf);
-
-      // Prepare the output object
-      var output = new
-      {
-        SignedPdfPath = finalPath
-      };
-
-      string outputJson = JsonSerializer.Serialize(output);
-      string outputBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(outputJson));
-
-      // Output the base64-encoded JSON
-      Console.WriteLine(outputBase64);
+      return ConvertToBase64(fullySignedPdf);
     }
 
     /// <summary>
@@ -261,6 +218,7 @@ namespace PdfSignApp
       using var msOut = new MemoryStream();
 
       X509Certificate[] chain = { Utils.LoadCertificateFromPem(input.CertificatePem) };
+      container.SetChain(chain);
       var reader = new PdfReader(msIn);
       var signer = new CustomPdfSigner(reader, msOut, new StampingProperties().UseAppendMode());
 
@@ -272,7 +230,8 @@ namespace PdfSignApp
                                .SetPageNumber(1)
                                .SetCertificate(chain[0]);
 
-      signer.SignExternalContainer(container, 8192);
+      signer.SetCertificationLevel(PdfSigner.NOT_CERTIFIED);
+      signer.SignExternalContainer(container, 16386);
 
       return msOut.ToArray();
     }
@@ -286,28 +245,13 @@ namespace PdfSignApp
       using var msOut = new MemoryStream();
 
       var reader = new PdfReader(msIn);
-      var signer = new PdfSigner(reader, msOut, new StampingProperties().UseAppendMode());
-
-      // Load certificate (optional, based on your requirements)
-      // If needed, you can extract the certificate from the pre-signed PDF or pass it via input
-      // For this example, we'll assume it's not needed in this step
+      var signer = new PdfSigner(reader, msOut, new StampingProperties());
 
       X509Certificate[] chain = { Utils.LoadCertificateFromPem(signInput.CertificatePem) };
-
-      // Create the PKCS7 signature
-      PdfPKCS7 sgn = new PdfPKCS7(null, chain, "SHA256", false);
-      byte[] hash = DigestAlgorithms.Digest(msIn, DigestUtilities.GetDigest("SHA256"));
-
-      byte[] authenticatedAttributes = sgn.GetAuthenticatedAttributeBytes(hash, PdfSigner.CryptoStandard.CMS, null, null);
       byte[] signatureBytes = HexStringToByteArray(signInput.SignedHash);
-
-      sgn.SetExternalDigest(signatureBytes, null, "RSA");
-      byte[] pkcs7 = sgn.GetEncodedPKCS7(hash, PdfSigner.CryptoStandard.CMS, null, null, null);
-
-      // Inject the final signature
-      var container = new FinalSignatureContainer(pkcs7);
-      PdfSigner.SignDeferred(signer.GetDocument(), "Signature1", msOut, container);
-
+      IExternalSignatureContainer external = new MyExternalSignatureContainer(chain, signatureBytes);
+      // Signs a PDF where space was already reserved. The field must cover the whole document.
+      PdfSigner.SignDeferred(signer.GetDocument(), "Signature1", msOut, external);
       return msOut.ToArray();
     }
 
@@ -328,6 +272,16 @@ namespace PdfSignApp
       }
 
       return bytes;
+    }
+
+    static string ConvertToBase64(byte[] data)
+    {
+      if (data == null)
+      {
+        throw new ArgumentNullException(nameof(data), "Input byte array cannot be null.");
+      }
+
+      return Convert.ToBase64String(data);
     }
 
     static void PrintUsage()
@@ -373,30 +327,39 @@ namespace PdfSignApp
     }
   }
 
-  /// <summary>
-  /// A custom signature container for the final step. This container simply
-  /// returns the final signature bytes (CMS/PKCS#7) that the client computed.
-  /// </summary>
-  public class FinalSignatureContainer : IExternalSignatureContainer
+  class MyExternalSignatureContainer : IExternalSignatureContainer
   {
-    private readonly byte[] _signature;
 
-    public FinalSignatureContainer(byte[] signature)
+    protected X509Certificate[] chain;
+    protected Stream localInputStream;
+    protected byte[] signature;
+
+    public MyExternalSignatureContainer(X509Certificate[] chain, byte[] signature)
     {
-      _signature = signature;
+      this.signature = signature;
+      this.chain = chain;
+    }
+
+    public byte[] Sign(Stream inputStream)
+    {
+      try
+      {
+        PdfPKCS7 sgn = new PdfPKCS7(null, chain, "SHA256", false);
+        byte[] hash = DigestAlgorithms.Digest(inputStream, DigestUtilities.GetDigest("SHA256"));
+        sgn.SetExternalDigest(signature, null, "RSA");
+
+        return sgn.GetEncodedPKCS7(hash, PdfSigner.CryptoStandard.CMS, null,
+            null, null);
+      }
+      catch (IOException ioe)
+      {
+        throw new Exception(ioe.Message);
+      }
     }
 
     public void ModifySigningDictionary(PdfDictionary signDic)
     {
-      // Optionally modify the signing dictionary if needed
-      // For example, you can set the SubFilter here if not already set
-      // signDic.Put(PdfName.SubFilter, PdfName.Adbe_pkcs7_detached);
-    }
-
-    public byte[] Sign(Stream data)
-    {
-      // Return the final signature bytes provided by the client
-      return _signature;
     }
   }
 }
+
