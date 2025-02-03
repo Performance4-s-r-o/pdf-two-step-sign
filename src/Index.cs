@@ -1,6 +1,6 @@
 namespace DotNetRuntime;
 
-using PdfSignApp;
+// using PdfSignApp;
 // using LocalDotNetRuntime;
 using System.Text.Json;
 
@@ -25,7 +25,7 @@ public class Handler
 
     if (type == "presign" && content != "")
     {
-      var response = PdfSignProgram.HandlePreSign(content.ToString());
+      var response = PdfSignProgram.HandlePreSign(content.ToString(), Context);
       return Context.Res.Json(new Dictionary<string, object?>()
       {
         { "content", response }

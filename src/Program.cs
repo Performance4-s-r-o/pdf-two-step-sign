@@ -4,13 +4,15 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using iText.IO.Image;
 using iText.Kernel.Geom;
 using iText.Kernel.Pdf;
+using iText.Layout.Element;
 using iText.Signatures;
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.X509;
 
-namespace PdfSignApp
+namespace DotNetRuntime
 {
   // Define the input objects for presign and sign commands
   public class PreSignInput
@@ -20,6 +22,9 @@ namespace PdfSignApp
     public string Location { get; set; } = "";
     public string Reason { get; set; } = "";
     public SignRect SignRect { get; set; } = new SignRect();
+    public string? SignImageContent { get; set; } = "";
+    public string? SignImageBackgroundContent { get; set; } = "";
+    public int SignPageNumber { get; set; } = 1;
   }
 
   public class SignRect
@@ -103,12 +108,13 @@ namespace PdfSignApp
     /// Handles the presign command.
     /// </summary>
     /// <param name="base64Input">Base64-encoded PreSignInput JSON string.</param>
-    public static string? HandlePreSign(string base64Input)
+    public static string? HandlePreSign(string base64Input, RuntimeContext Context)
     {
       PreSignInput input;
       try
       {
         string json = Encoding.UTF8.GetString(Convert.FromBase64String(base64Input));
+        Context.Log(new { json });
         input = JsonSerializer.Deserialize<PreSignInput>(json);
         if (input == null)
         {
@@ -138,7 +144,7 @@ namespace PdfSignApp
       byte[] pdfWithPlaceholder;
       try
       {
-        pdfWithPlaceholder = CreatePreSignedPdf(originalPdf, preSignContainer, input);
+        pdfWithPlaceholder = CreatePreSignedPdf(originalPdf, preSignContainer, input, Context);
       }
       catch (Exception ex)
       {
@@ -212,7 +218,7 @@ namespace PdfSignApp
     /// <summary>
     /// Creates a pre-signed PDF with a placeholder signature.
     /// </summary>
-    static byte[] CreatePreSignedPdf(byte[] originalPdf, DigestCalcBlankSigner container, PreSignInput input)
+    static byte[] CreatePreSignedPdf(byte[] originalPdf, DigestCalcBlankSigner container, PreSignInput input, RuntimeContext context)
     {
       using var msIn = new MemoryStream(originalPdf);
       using var msOut = new MemoryStream();
@@ -223,12 +229,21 @@ namespace PdfSignApp
       var signer = new CustomPdfSigner(reader, msOut, new StampingProperties().UseAppendMode());
 
       // Setup signature appearance
-      var appearance = signer.GetSignatureAppearance()
-                               .SetReason(input.Reason)
-                               .SetLocation(input.Location)
-                               .SetPageRect(new Rectangle(input.SignRect.X, input.SignRect.Y, input.SignRect.Width, input.SignRect.Height))
-                               .SetPageNumber(1)
-                               .SetCertificate(chain[0]);
+      var appearance = signer.GetSignatureAppearance();
+
+      appearance.SetReason(input.Reason)
+      .SetLocation(input.Location)
+      .SetPageRect(new Rectangle(input.SignRect.X, input.SignRect.Y, input.SignRect.Width, input.SignRect.Height))
+      .SetPageNumber(input.SignPageNumber);
+
+      if (!String.IsNullOrEmpty(input.SignImageContent))
+      {
+        byte[] image = Convert.FromBase64String(input.SignImageContent);
+        appearance.SetSignatureGraphic(ImageDataFactory.Create(image));
+        appearance.SetRenderingMode(PdfSignatureAppearance.RenderingMode.GRAPHIC_AND_DESCRIPTION);
+      }
+
+      appearance.SetCertificate(chain[0]);
 
       signer.SetCertificationLevel(PdfSigner.NOT_CERTIFIED);
       signer.SignExternalContainer(container, 16386);
